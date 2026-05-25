@@ -1,0 +1,18 @@
+.claude/
+.cursor/
+.vscode/
+.idea/
+*.swp
+
+# Scaffold-backup folder used to stage commit #1 — delete after history is clean
+.scaffold-backup/
+
+
+.DS_Store
+Thumbs.db
+
+*.log
+
+.env
+.env.local
+.env.*.local
