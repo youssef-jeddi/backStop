@@ -35,6 +35,8 @@ contract BackstopHook is BaseHook {
     uint256 public constant MIN_PREMIUM_BPS = 500;
     // Maximum premium
     uint256 public constant MAX_PREMIUM_BPS = 3_000;
+    // Cumulative-volatility value (in bps)
+    uint256 public constant VOL_BPS_HIGH = 1_000;
     // Size of the observation buffer used to estimate realized volatility
     uint256 public constant OBSERVATION_BUFFER_SIZE = 16;
 
@@ -75,9 +77,7 @@ contract BackstopHook is BaseHook {
     uint256 public totalClaimsPaidWETH;
     uint256 public immutable poolStartTimestamp;
 
-    /// @notice Time conversion for annualizing lifetime accumulators. Uses
-    ///         the 365-day "trading year" approximation — close enough for
-    ///         demo APY displays.
+    /// @notice Time conversion for annualizing lifetime accumulators
     uint256 public constant SECONDS_PER_YEAR = 365 days;
 
     /*//////////////////////////////////////////////////////////////
@@ -191,5 +191,52 @@ contract BackstopHook is BaseHook {
         returns (bytes4, int128)
     {
         return (BaseHook.afterSwap.selector, int128(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                VOLATILITY AND DYNAMIC PREMIUM FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Push the current sqrtPriceX96 into the observation buffer.
+    function recordObservation(uint160 sqrtPriceX96) internal {
+        observations[observationHead] = sqrtPriceX96;
+        observationHead = (observationHead + 1) % OBSERVATION_BUFFER_SIZE;
+        if (observationCount < OBSERVATION_BUFFER_SIZE) {
+            unchecked {
+                observationCount++;
+            }
+        }
+    }
+
+    /// @notice Calculates the volatility
+    function calculateVolatility() public view returns (uint256 vol) {
+        uint256 count = observationCount;
+        // Need at least two observations
+        if (count < 2) return 0;
+
+        uint256 bufferSize = OBSERVATION_BUFFER_SIZE;
+        // Start at the oldest observation
+        uint256 startIdx = (observationHead + bufferSize - count) % bufferSize;
+
+        for (uint256 i = 1; i < count; ++i) {
+            uint160 prev = observations[(startIdx + i - 1) % bufferSize];
+            uint160 curr = observations[(startIdx + i) % bufferSize];
+            uint160 delta;
+            unchecked {
+                delta = curr > prev ? curr - prev : prev - curr;
+            }
+            if (prev != 0) {
+                vol += (uint256(delta) * 10_000) / uint256(prev);
+            }
+        }
+    }
+
+    /// @notice Maps the volatilty onto a premium share of swap fees
+    function getPremiumRate() public view returns (uint256) {
+        uint256 vol = calculateVolatility();
+        if (vol >= VOL_BPS_HIGH) return MAX_PREMIUM_BPS;
+
+        uint256 squared = (vol * vol) / VOL_BPS_HIGH;
+        return MIN_PREMIUM_BPS + (squared * (MAX_PREMIUM_BPS - MIN_PREMIUM_BPS)) / VOL_BPS_HIGH;
     }
 }
