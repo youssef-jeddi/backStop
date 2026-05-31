@@ -5,6 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 abstract contract CodeConstants {
     // Chain IDs
@@ -31,10 +32,19 @@ contract HelperConfig is CodeConstants, Script {
         address poolManager;
         address usdc;
         address weth;
+        uint24 swapFee;
+        int24 tickSpacing;
+        uint160 startingSqrtPriceX96;
     }
 
     NetworkConfig public localNetworkConfig;
     NetworkConfig public sepoliaNetworkConfig;
+
+    uint24 internal constant POOL_FEE = LPFeeLibrary.DYNAMIC_FEE_FLAG;
+    int24 internal constant POOL_TICK_SPACING = 60;
+
+    // Initial sqrt-price for our pool
+    uint160 internal constant STARTING_SQRT_PRICE = 79_228_162_514_264_337_593_543_950_336;
 
     function getConfig() public returns (NetworkConfig memory) {
         return getConfigByChainId(block.chainid);
@@ -62,8 +72,14 @@ contract HelperConfig is CodeConstants, Script {
         PoolManager poolManager = new PoolManager(msg.sender);
         vm.stopBroadcast();
 
-        localNetworkConfig =
-            NetworkConfig({poolManager: address(poolManager), usdc: address(usdc), weth: address(weth)});
+        localNetworkConfig = NetworkConfig({
+            poolManager: address(poolManager),
+            usdc: address(usdc),
+            weth: address(weth),
+            swapFee: POOL_FEE,
+            tickSpacing: POOL_TICK_SPACING,
+            startingSqrtPriceX96: STARTING_SQRT_PRICE
+        });
         return localNetworkConfig;
     }
 
@@ -82,8 +98,14 @@ contract HelperConfig is CodeConstants, Script {
         MockERC20 weth = new MockERC20("Mock WETH", "mWETH", 18);
         vm.stopBroadcast();
 
-        sepoliaNetworkConfig =
-            NetworkConfig({poolManager: SEPOLIA_POOL_MANAGER, usdc: address(usdc), weth: address(weth)});
+        sepoliaNetworkConfig = NetworkConfig({
+            poolManager: SEPOLIA_POOL_MANAGER,
+            usdc: address(usdc),
+            weth: address(weth),
+            swapFee: POOL_FEE,
+            tickSpacing: POOL_TICK_SPACING,
+            startingSqrtPriceX96: STARTING_SQRT_PRICE
+        });
         return sepoliaNetworkConfig;
     }
 }

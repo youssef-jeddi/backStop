@@ -24,6 +24,8 @@ contract BackstopHookDeployTest is BackstopFixture {
         assertTrue(p.afterAddLiquidity, "afterAddLiquidity should be enabled");
         assertTrue(p.afterRemoveLiquidity, "afterRemoveLiquidity should be enabled");
         assertTrue(p.afterSwap, "afterSwap should be enabled");
+        assertTrue(p.beforeSwap, "beforeSwap should be enabled (dynamic-fee override)");
+        assertTrue(p.afterSwapReturnDelta, "afterSwapReturnDelta should be enabled (premium take)");
 
         // Disabled
         assertFalse(p.beforeInitialize, "beforeInitialize should be off");
@@ -31,7 +33,6 @@ contract BackstopHookDeployTest is BackstopFixture {
         assertFalse(p.beforeRemoveLiquidity, "beforeRemoveLiquidity should be off");
         assertFalse(p.beforeDonate, "beforeDonate should be off");
         assertFalse(p.afterDonate, "afterDonate should be off");
-        assertFalse(p.beforeSwap, "beforeSwap should be off");
     }
 
     // Deploying to a wrong address must revert

@@ -21,8 +21,8 @@ import {MockWETHVault} from "../../src/vaults/MockWETHVault.sol";
 // Shared test scaffold for every BackstopHook test suite
 abstract contract BackstopFixture is Test, Deployers {
     uint160 internal constant HOOK_FLAGS = uint160(
-        Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-            | Hooks.AFTER_SWAP_FLAG
+        Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+            | Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
     );
 
     address internal constant HOOK_ADDRESS = address(HOOK_FLAGS);
@@ -33,7 +33,14 @@ abstract contract BackstopFixture is Test, Deployers {
     MockWETHVault internal wethVault;
     BackstopHook internal hook;
 
+    PoolKey internal poolKey;
+    bool internal usdcIsToken0;
+
     uint256 internal constant SEED_BALANCE = 1_000_000 ether;
+
+    uint24 internal constant POOL_FEE = LPFeeLibrary.DYNAMIC_FEE_FLAG;
+    int24 internal constant POOL_TICK_SPACING = 60;
+    uint24 internal constant TARGET_TOTAL_FEE_PIPS = 3_000;
 
     function setUp() public virtual {
         // 1. v4 manager + every periphery test router we might want.
@@ -50,6 +57,13 @@ abstract contract BackstopFixture is Test, Deployers {
         // 4. Vaults
         usdcVault = new MockUSDCVault(IERC20(address(usdc)));
         wethVault = new MockWETHVault(IERC20(address(weth)));
+        usdc.approve(address(swapRouter), type(uint256).max);
+        weth.approve(address(swapRouter), type(uint256).max);
+        usdc.approve(address(modifyLiquidityRouter), type(uint256).max);
+        weth.approve(address(modifyLiquidityRouter), type(uint256).max);
+
+        usdcVault = new MockUSDCVault(IERC20(address(usdc)));
+        wethVault = new MockWETHVault(IERC20(address(weth)));
 
         // 5. Deploy the hook
         deployCodeTo(
@@ -64,6 +78,26 @@ abstract contract BackstopFixture is Test, Deployers {
             HOOK_ADDRESS
         );
         hook = BackstopHook(HOOK_ADDRESS);
+
+        // 6. Build the pool key
+        usdcIsToken0 = address(usdc) < address(weth);
+        (Currency currency0, Currency currency1) = usdcIsToken0
+            ? (Currency.wrap(address(usdc)), Currency.wrap(address(weth)))
+            : (Currency.wrap(address(weth)), Currency.wrap(address(usdc)));
+
+        poolKey = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: POOL_FEE,
+            tickSpacing: POOL_TICK_SPACING,
+            hooks: IHooks(address(hook))
+        });
+
+        // 7. Initialize the pool at a 1:1 sqrt-price
+        manager.initialize(poolKey, SQRT_PRICE_1_1);
+
+        // 8. Seed initial liquidity
+        modifyLiquidityRouter.modifyLiquidity(poolKey, LIQUIDITY_PARAMS, ZERO_BYTES);
 
         vm.label(address(manager), "PoolManager");
         vm.label(address(usdc), "mUSDC");

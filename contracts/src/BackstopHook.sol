@@ -7,13 +7,20 @@ import {BaseHook} from "v4-hooks-public/src/base/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 import {IYieldVault} from "./interfaces/IYieldVault.sol";
 
 contract BackstopHook is BaseHook {
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
+
     /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
@@ -35,6 +42,8 @@ contract BackstopHook is BaseHook {
     uint256 public constant MIN_PREMIUM_BPS = 500;
     // Maximum premium
     uint256 public constant MAX_PREMIUM_BPS = 3_000;
+    // Total fee the trader experiences on every swap
+    uint24 public constant TARGET_TOTAL_FEE_PIPS = 3_000;
     // Cumulative-volatility value (in bps)
     uint256 public constant VOL_BPS_HIGH = 1_000;
     // Size of the observation buffer used to estimate realized volatility
@@ -167,30 +176,61 @@ contract BackstopHook is BaseHook {
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
-    /*
-        /// @notice Before each swap: compute today's premium rate from current
-        ///         vol and override the pool's LP fee to leave room for the
-        ///         hook's share.
-        function _beforeSwap(
-            address,
-            PoolKey calldata,
-            SwapParams calldata,
-            bytes calldata
-        )
-        {
+    /// @notice Before each swap: compute today's premium rate from current
+    ///         vol and override the pool's LP fee to leave room for the
+    ///         hook's share.
+    function _beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        uint256 premiumRateBps = getPremiumRate();
 
-        }
-    */
+        // LP gets TARGET × (1 - premiumRate)
+        // hook will claim the rest in _afterSwap.
+        uint24 lpFeePips = uint24((uint256(TARGET_TOTAL_FEE_PIPS) * (10_000 - premiumRateBps)) / 10_000);
+        uint24 lpFeeOverride = lpFeePips | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeOverride);
+    }
 
     /// @notice After each swap: physically claim the underwriter premium from
     ///         the pool, route it to the matching pending reserve, then push
     ///         the post-swap sqrt-price into the observation buffer.
-    function _afterSwap(address, PoolKey calldata, SwapParams calldata, BalanceDelta, bytes calldata)
+    function _afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         internal
         override
         returns (bytes4, int128)
     {
-        return (BaseHook.afterSwap.selector, int128(0));
+        uint256 premiumRateBps = getPremiumRate();
+        uint256 hookClaim;
+
+        {
+            uint256 hookSharePips = (uint256(TARGET_TOTAL_FEE_PIPS) * premiumRateBps) / 10_000;
+
+            // Find the unspecified side cause v4 only allows the hook to touch
+            // the currency the trader didn't specify
+            bool unspecifiedIsCurrency1 = params.zeroForOne == (params.amountSpecified < 0);
+            Currency unspecifiedCurrency = unspecifiedIsCurrency1 ? key.currency1 : key.currency0;
+            int128 unspecifiedDelta = unspecifiedIsCurrency1 ? delta.amount1() : delta.amount0();
+
+            uint256 unspecifiedMag =
+                unspecifiedDelta >= 0 ? uint256(uint128(unspecifiedDelta)) : uint256(uint128(-unspecifiedDelta));
+
+            hookClaim = (unspecifiedMag * hookSharePips) / 1_000_000;
+
+            if (hookClaim > 0) {
+                // Pull real tokens from PoolManager
+                poolManager.take(unspecifiedCurrency, address(this), hookClaim);
+                _routePremium(unspecifiedCurrency, hookClaim, premiumRateBps);
+            }
+        }
+
+        // Record observation last
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
+        recordObservation(sqrtPriceX96);
+
+        return (BaseHook.afterSwap.selector, int128(int256(hookClaim)));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -238,5 +278,22 @@ contract BackstopHook is BaseHook {
 
         uint256 squared = (vol * vol) / VOL_BPS_HIGH;
         return MIN_PREMIUM_BPS + (squared * (MAX_PREMIUM_BPS - MIN_PREMIUM_BPS)) / VOL_BPS_HIGH;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    function _routePremium(Currency currency, uint256 amount, uint256 rateBps) internal {
+        address token = Currency.unwrap(currency);
+        if (token == address(usdc)) {
+            pendingUSDC += amount;
+            totalPremiumsAccumulatedUSDC += amount;
+            emit PremiumAccrued(address(usdc), amount, rateBps);
+        } else if (token == address(weth)) {
+            pendingWETH += amount;
+            totalPremiumsAccumulatedWETH += amount;
+            emit PremiumAccrued(address(weth), amount, rateBps);
+        }
     }
 }
