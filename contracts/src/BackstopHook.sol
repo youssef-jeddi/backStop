@@ -84,6 +84,10 @@ contract BackstopHook is BaseHook {
     uint256 public totalPremiumsAccumulatedWETH;
     uint256 public totalClaimsPaidUSDC;
     uint256 public totalClaimsPaidWETH;
+    uint256 public totalVaultUSDCDeposited;
+    uint256 public totalVaultWETHDeposited;
+    uint256 public totalVaultUSDCWithdrawn;
+    uint256 public totalVaultWETHWithdrawn;
     uint256 public immutable poolStartTimestamp;
 
     /// @notice Time conversion for annualizing lifetime accumulators
@@ -95,6 +99,10 @@ contract BackstopHook is BaseHook {
 
     error PoolTokenMismatch();
     error VaultAssetMismatch();
+    error UnsupportedToken(address token);
+    error ZeroAmount();
+    error ZeroShares();
+    error InsufficientShares();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -122,6 +130,10 @@ contract BackstopHook is BaseHook {
         usdcVault = _usdcVault;
         wethVault = _wethVault;
         poolStartTimestamp = block.timestamp;
+
+        // Vaults are trusted (set at construction and immutable)
+        _usdc.approve(address(_usdcVault), type(uint256).max);
+        _weth.approve(address(_wethVault), type(uint256).max);
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -281,6 +293,68 @@ contract BackstopHook is BaseHook {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        UNDERWRITERS OPERATIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Deposit 'amount' of 'token' into the matching underwriting pool
+    ///         and receive proportional shares
+    function depositAsUnderwriter(address token, uint256 amount) external returns (uint256 shares) {
+        if (amount == 0) revert ZeroAmount();
+        _sweep();
+
+        uint256 nav;
+        uint256 totalSharesOutstanding;
+        if (token == address(usdc)) {
+            nav = _navUSDC();
+            totalSharesOutstanding = totalUSDCUnderwriterShares;
+        } else if (token == address(weth)) {
+            nav = _navWETH();
+            totalSharesOutstanding = totalWETHUnderwriterShares;
+        } else {
+            revert UnsupportedToken(token);
+        }
+
+        shares = (totalSharesOutstanding == 0 || nav == 0) ? amount : (amount * totalSharesOutstanding) / nav;
+        if (shares == 0) revert ZeroAmount();
+
+        if (token == address(usdc)) {
+            usdcUnderwriterShares[msg.sender] += shares;
+            totalUSDCUnderwriterShares = totalSharesOutstanding + shares;
+            liquidBufferUSDC += amount;
+            usdc.transferFrom(msg.sender, address(this), amount);
+            emit UnderwriterDeposited(msg.sender, address(usdc), amount, shares);
+            _rebalanceUSDC();
+        } else {
+            wethUnderwriterShares[msg.sender] += shares;
+            totalWETHUnderwriterShares = totalSharesOutstanding + shares;
+            liquidBufferWETH += amount;
+            weth.transferFrom(msg.sender, address(this), amount);
+            emit UnderwriterDeposited(msg.sender, address(weth), amount, shares);
+            _rebalanceWETH();
+        }
+    }
+
+    /// @notice Burn 'shares' and receive the proportional amount of 'token'
+    function withdrawAsUnderwriter(address token, uint256 shares) external returns (uint256 amountOut) {
+        if (shares == 0) revert ZeroShares();
+        _sweep();
+
+        if (token == address(usdc)) {
+            amountOut = _withdrawUSDC(shares);
+        } else if (token == address(weth)) {
+            amountOut = _withdrawWETH(shares);
+        } else {
+            revert UnsupportedToken(token);
+        }
+    }
+
+    /// @notice Move accumulated swap-fee premium into the underwriting reserves
+    ///         Permissionless function
+    function sweepToVaults() external {
+        _sweep();
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
 
@@ -295,5 +369,168 @@ contract BackstopHook is BaseHook {
             totalPremiumsAccumulatedWETH += amount;
             emit PremiumAccrued(address(weth), amount, rateBps);
         }
+    }
+
+    function _sweep() internal {
+        uint256 usdcToVault;
+        uint256 wethToVault;
+        uint256 usdcToBuffer;
+        uint256 wethToBuffer;
+
+        uint256 pUsdc = pendingUSDC;
+        if (pUsdc > 0) {
+            usdcToBuffer = (pUsdc * BUFFER_RATIO_BPS) / 10_000;
+            usdcToVault = pUsdc - usdcToBuffer;
+            pendingUSDC = 0;
+            liquidBufferUSDC += usdcToBuffer;
+            if (usdcToVault > 0) {
+                usdcVault.deposit(usdcToVault);
+                totalVaultUSDCDeposited += usdcToVault;
+            }
+        }
+
+        uint256 pWeth = pendingWETH;
+        if (pWeth > 0) {
+            wethToBuffer = (pWeth * BUFFER_RATIO_BPS) / 10_000;
+            wethToVault = pWeth - wethToBuffer;
+            pendingWETH = 0;
+            liquidBufferWETH += wethToBuffer;
+            if (wethToVault > 0) {
+                wethVault.deposit(wethToVault);
+                totalVaultWETHDeposited += wethToVault;
+            }
+        }
+
+        if (pUsdc > 0 || pWeth > 0) {
+            emit SweptToVaults(usdcToVault, wethToVault, usdcToBuffer, wethToBuffer);
+        }
+    }
+
+    function _withdrawUSDC(uint256 shares) internal returns (uint256 amountOut) {
+        uint256 userShares = usdcUnderwriterShares[msg.sender];
+        if (shares > userShares) revert InsufficientShares();
+
+        uint256 totalSharesOutstanding = totalUSDCUnderwriterShares;
+        amountOut = (shares * _navUSDC()) / totalSharesOutstanding;
+
+        // Effects.
+        usdcUnderwriterShares[msg.sender] = userShares - shares;
+        totalUSDCUnderwriterShares = totalSharesOutstanding - shares;
+
+        // Interactions: buffer first, vault for any shortfall.
+        _ensureBufferUSDC(amountOut);
+        liquidBufferUSDC -= amountOut;
+        usdc.transfer(msg.sender, amountOut);
+        emit UnderwriterWithdrew(msg.sender, address(usdc), shares, amountOut);
+    }
+
+    function _withdrawWETH(uint256 shares) internal returns (uint256 amountOut) {
+        uint256 userShares = wethUnderwriterShares[msg.sender];
+        if (shares > userShares) revert InsufficientShares();
+
+        uint256 totalSharesOutstanding = totalWETHUnderwriterShares;
+        amountOut = (shares * _navWETH()) / totalSharesOutstanding;
+
+        wethUnderwriterShares[msg.sender] = userShares - shares;
+        totalWETHUnderwriterShares = totalSharesOutstanding - shares;
+
+        _ensureBufferWETH(amountOut);
+        liquidBufferWETH -= amountOut;
+        weth.transfer(msg.sender, amountOut);
+        emit UnderwriterWithdrew(msg.sender, address(weth), shares, amountOut);
+    }
+
+    /// @notice Rebalance the USDC side to the target 20% buffer / 80% vault
+    function _rebalanceUSDC() internal {
+        uint256 buffer = liquidBufferUSDC;
+        uint256 vaultHeld = _vaultAssetsHeldBy(usdcVault);
+        uint256 nav = buffer + vaultHeld;
+        if (nav == 0) return;
+
+        uint256 targetBuffer = (nav * BUFFER_RATIO_BPS) / 10_000;
+
+        if (buffer > targetBuffer) {
+            uint256 excess = buffer - targetBuffer;
+            liquidBufferUSDC = buffer - excess;
+            usdcVault.deposit(excess);
+            totalVaultUSDCDeposited += excess;
+        } else if (buffer < targetBuffer) {
+            uint256 shortfall = targetBuffer - buffer;
+            uint256 sharesToBurn = _vaultSharesFor(usdcVault, shortfall);
+            if (sharesToBurn > 0) {
+                uint256 pulled = usdcVault.withdraw(sharesToBurn);
+                liquidBufferUSDC += pulled;
+                totalVaultUSDCWithdrawn += pulled;
+            }
+        }
+    }
+
+    function _rebalanceWETH() internal {
+        uint256 buffer = liquidBufferWETH;
+        uint256 vaultHeld = _vaultAssetsHeldBy(wethVault);
+        uint256 nav = buffer + vaultHeld;
+        if (nav == 0) return;
+
+        uint256 targetBuffer = (nav * BUFFER_RATIO_BPS) / 10_000;
+
+        if (buffer > targetBuffer) {
+            uint256 excess = buffer - targetBuffer;
+            liquidBufferWETH = buffer - excess;
+            wethVault.deposit(excess);
+            totalVaultWETHDeposited += excess;
+        } else if (buffer < targetBuffer) {
+            uint256 shortfall = targetBuffer - buffer;
+            uint256 sharesToBurn = _vaultSharesFor(wethVault, shortfall);
+            if (sharesToBurn > 0) {
+                uint256 pulled = wethVault.withdraw(sharesToBurn);
+                liquidBufferWETH += pulled;
+                totalVaultWETHWithdrawn += pulled;
+            }
+        }
+    }
+
+    /// @notice Tops up the USDC buffer from the vault if needed to cover 'needed'
+    function _ensureBufferUSDC(uint256 needed) internal {
+        if (needed <= liquidBufferUSDC) return;
+        uint256 shortfall = needed - liquidBufferUSDC;
+        uint256 sharesToBurn = _vaultSharesFor(usdcVault, shortfall);
+        uint256 pulled = usdcVault.withdraw(sharesToBurn);
+        liquidBufferUSDC += pulled;
+        totalVaultUSDCWithdrawn += pulled;
+    }
+
+    function _ensureBufferWETH(uint256 needed) internal {
+        if (needed <= liquidBufferWETH) return;
+        uint256 shortfall = needed - liquidBufferWETH;
+        uint256 sharesToBurn = _vaultSharesFor(wethVault, shortfall);
+        uint256 pulled = wethVault.withdraw(sharesToBurn);
+        liquidBufferWETH += pulled;
+        totalVaultWETHWithdrawn += pulled;
+    }
+
+    function _navUSDC() internal view returns (uint256) {
+        return liquidBufferUSDC + _vaultAssetsHeldBy(usdcVault);
+    }
+
+    function _navWETH() internal view returns (uint256) {
+        return liquidBufferWETH + _vaultAssetsHeldBy(wethVault);
+    }
+
+    /// @notice Hook's claim on the vault's underlying
+    function _vaultAssetsHeldBy(IYieldVault vault) internal view returns (uint256) {
+        uint256 ourShares = vault.balanceOf(address(this));
+        if (ourShares == 0) return 0;
+        uint256 totalSharesOutstanding = vault.totalShares();
+        if (totalSharesOutstanding == 0) return 0;
+        return (vault.totalAssets() * ourShares) / totalSharesOutstanding;
+    }
+
+    /// @notice Number of vault shares to burn to receive at least 'assetsNeeded'
+    function _vaultSharesFor(IYieldVault vault, uint256 assetsNeeded) internal view returns (uint256) {
+        uint256 totalAssets = vault.totalAssets();
+        if (totalAssets == 0) return 0;
+        uint256 totalSharesOutstanding = vault.totalShares();
+        if (totalSharesOutstanding == 0) return 0;
+        return (assetsNeeded * totalSharesOutstanding + totalAssets - 1) / totalAssets;
     }
 }
