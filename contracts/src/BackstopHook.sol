@@ -16,6 +16,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 import {IYieldVault} from "./interfaces/IYieldVault.sol";
+import {ILMath} from "./libraries/ILMath.sol";
 
 contract BackstopHook is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -192,7 +193,7 @@ contract BackstopHook is BaseHook {
 
     /// @notice After every remove-liquidity: look up the LP's entry snapshot,
     ///         compute IL against the current price, and pay out the LP from
-    ///         the underwriting reserves if IL crosses IL_THRESHOLD_BPS.
+    ///         the underwriting reserves if IL crosses the threshold
     function _afterRemoveLiquidity(
         address sender,
         PoolKey calldata key,
@@ -201,6 +202,25 @@ contract BackstopHook is BaseHook {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
+        bytes32 posKey = _positionKey(sender, params.tickLower, params.tickUpper, params.salt);
+        LPPosition memory pos = lpPositions[posKey];
+
+        // No tracked entry so nothing to do, shouldn't happen
+        if (pos.entryLiquidity == 0) {
+            return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
+        (uint160 currentSqrt,,,) = poolManager.getSlot0(key.toId());
+        uint256 ilBps = ILMath.computeIL(pos.entrySqrtPriceX96, currentSqrt);
+
+        // clear the entry
+        delete lpPositions[posKey];
+
+        if (ilBps <= IL_THRESHOLD_BPS) {
+            return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
+        }
+
+        _payILClaim(sender, key, delta, ilBps);
         return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
@@ -556,5 +576,46 @@ contract BackstopHook is BaseHook {
         returns (bytes32)
     {
         return keccak256(abi.encode(owner, tickLower, tickUpper, salt));
+    }
+
+    function _payILClaim(address lp, PoolKey calldata key, BalanceDelta delta, uint256 ilBps) internal {
+        uint256 payout0 = (uint256(uint128(delta.amount0())) * ilBps) / 10_000;
+        uint256 payout1 = (uint256(uint128(delta.amount1())) * ilBps) / 10_000;
+
+        uint256 paidUSDC;
+        uint256 paidWETH;
+        if (Currency.unwrap(key.currency0) == address(usdc)) {
+            if (payout0 > 0) paidUSDC = _payClaimUSDC(lp, payout0);
+            if (payout1 > 0) paidWETH = _payClaimWETH(lp, payout1);
+        } else {
+            if (payout0 > 0) paidWETH = _payClaimWETH(lp, payout0);
+            if (payout1 > 0) paidUSDC = _payClaimUSDC(lp, payout1);
+        }
+
+        emit ILClaimPaid(lp, ilBps, paidUSDC, paidWETH);
+    }
+
+    // Pays 'amount' to 'lp' from the underwriting pool
+    // Returns the amount actually paid
+    function _payClaimUSDC(address lp, uint256 amount) internal returns (uint256 paid) {
+        uint256 nav = _navUSDC();
+        paid = amount > nav ? nav : amount;
+        if (paid == 0) return 0;
+
+        _ensureBufferUSDC(paid);
+        liquidBufferUSDC -= paid;
+        totalClaimsPaidUSDC += paid;
+        usdc.transfer(lp, paid);
+    }
+
+    function _payClaimWETH(address lp, uint256 amount) internal returns (uint256 paid) {
+        uint256 nav = _navWETH();
+        paid = amount > nav ? nav : amount;
+        if (paid == 0) return 0;
+
+        _ensureBufferWETH(paid);
+        liquidBufferWETH -= paid;
+        totalClaimsPaidWETH += paid;
+        weth.transfer(lp, paid);
     }
 }
