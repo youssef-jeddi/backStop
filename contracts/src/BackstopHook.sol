@@ -160,9 +160,9 @@ contract BackstopHook is BaseHook {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice After every add-liquidity: snapshot the LP's entry sqrt-price
-    ///         and liquidity into lpPositions.
+    ///         and liquidity into lpPositions
     ///         _afterRemoveLiquidity uses this snapshot to compute IL versus
-    ///         the price the LP first added at.
+    ///         the price the LP first added at
     function _afterAddLiquidity(
         address sender,
         PoolKey calldata key,
@@ -171,6 +171,22 @@ contract BackstopHook is BaseHook {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, BalanceDelta) {
+        bytes32 posKey = _positionKey(sender, params.tickLower, params.tickUpper, params.salt);
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
+        uint128 added = uint128(uint256(params.liquidityDelta));
+
+        LPPosition storage pos = lpPositions[posKey];
+        if (pos.entryLiquidity == 0) {
+            pos.entrySqrtPriceX96 = sqrtPriceX96;
+            pos.entryLiquidity = added;
+        } else {
+            uint256 totalLiq = uint256(pos.entryLiquidity) + added;
+            uint256 weighted =
+                (uint256(pos.entrySqrtPriceX96) * pos.entryLiquidity + uint256(sqrtPriceX96) * added) / totalLiq;
+            pos.entrySqrtPriceX96 = uint160(weighted);
+            pos.entryLiquidity = uint128(totalLiq);
+        }
+
         return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
@@ -532,5 +548,13 @@ contract BackstopHook is BaseHook {
         uint256 totalSharesOutstanding = vault.totalShares();
         if (totalSharesOutstanding == 0) return 0;
         return (assetsNeeded * totalSharesOutstanding + totalAssets - 1) / totalAssets;
+    }
+
+    function _positionKey(address owner, int24 tickLower, int24 tickUpper, bytes32 salt)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(owner, tickLower, tickUpper, salt));
     }
 }
