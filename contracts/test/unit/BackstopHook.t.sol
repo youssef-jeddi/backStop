@@ -20,7 +20,6 @@ contract BackstopHookDeployTest is BackstopFixture {
         Hooks.Permissions memory p = hook.getHookPermissions();
 
         // Enabled
-        assertTrue(p.beforeAddLiquidity, "beforeAddLiquidity should be enabled");
         assertTrue(p.afterAddLiquidity, "afterAddLiquidity should be enabled");
         assertTrue(p.afterRemoveLiquidity, "afterRemoveLiquidity should be enabled");
         assertTrue(p.afterSwap, "afterSwap should be enabled");
@@ -28,6 +27,7 @@ contract BackstopHookDeployTest is BackstopFixture {
         assertTrue(p.afterSwapReturnDelta, "afterSwapReturnDelta should be enabled (premium take)");
 
         // Disabled
+        assertFalse(p.beforeAddLiquidity, "beforeAddLiquidity should be off");
         assertFalse(p.beforeInitialize, "beforeInitialize should be off");
         assertFalse(p.afterInitialize, "afterInitialize should be off");
         assertFalse(p.beforeRemoveLiquidity, "beforeRemoveLiquidity should be off");
