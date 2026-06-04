@@ -235,7 +235,7 @@ contract BackstopHook is BaseHook {
         uint256 premiumRateBps = getPremiumRate();
 
         // LP gets TARGET × (1 - premiumRate)
-        // hook will claim the rest in _afterSwap.
+        // hook will claim the rest in _afterSwap
         uint24 lpFeePips = uint24((uint256(TARGET_TOTAL_FEE_PIPS) * (10_000 - premiumRateBps)) / 10_000);
         uint24 lpFeeOverride = lpFeePips | LPFeeLibrary.OVERRIDE_FEE_FLAG;
 
@@ -617,5 +617,88 @@ contract BackstopHook is BaseHook {
         liquidBufferWETH -= paid;
         totalClaimsPaidWETH += paid;
         weth.transfer(lp, paid);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function getCurrentVolatility() external view returns (uint256) {
+        return calculateVolatility();
+    }
+
+    function getCurrentPremiumRate() external view returns (uint256) {
+        return getPremiumRate();
+    }
+
+    /// @notice Snapshot of one underwriting pool's composition
+    function getReserveComposition(address token)
+        external
+        view
+        returns (uint256 buffer, uint256 vaultAssets, uint256 totalShares)
+    {
+        if (token == address(usdc)) {
+            buffer = liquidBufferUSDC;
+            vaultAssets = _vaultAssetsHeldBy(usdcVault);
+            totalShares = totalUSDCUnderwriterShares;
+        } else if (token == address(weth)) {
+            buffer = liquidBufferWETH;
+            vaultAssets = _vaultAssetsHeldBy(wethVault);
+            totalShares = totalWETHUnderwriterShares;
+        } else {
+            revert UnsupportedToken(token);
+        }
+    }
+
+    function getUnderwriterShares(address user, address token) external view returns (uint256) {
+        if (token == address(usdc)) return usdcUnderwriterShares[user];
+        if (token == address(weth)) return wethUnderwriterShares[user];
+        revert UnsupportedToken(token);
+    }
+
+    /// @notice Annualized breakdown of underwriter returns for one pool in bps
+    function getUnderwriterAPYBreakdown(address token)
+        external
+        view
+        returns (uint256 premiumAPY, uint256 vaultAPY, uint256 claimDragBps, int256 netAPY)
+    {
+        uint256 nav;
+        uint256 lifetimePremiums;
+        uint256 lifetimeClaims;
+        uint256 vaultYield;
+
+        if (token == address(usdc)) {
+            nav = _navUSDC();
+            lifetimePremiums = totalPremiumsAccumulatedUSDC;
+            lifetimeClaims = totalClaimsPaidUSDC;
+            vaultYield = _vaultYieldUSDC();
+        } else if (token == address(weth)) {
+            nav = _navWETH();
+            lifetimePremiums = totalPremiumsAccumulatedWETH;
+            lifetimeClaims = totalClaimsPaidWETH;
+            vaultYield = _vaultYieldWETH();
+        } else {
+            revert UnsupportedToken(token);
+        }
+
+        uint256 poolAge = block.timestamp - poolStartTimestamp;
+        if (nav == 0 || poolAge == 0) return (0, 0, 0, 0);
+
+        uint256 denom = nav * poolAge;
+        premiumAPY = (lifetimePremiums * SECONDS_PER_YEAR * 10_000) / denom;
+        vaultAPY = (vaultYield * SECONDS_PER_YEAR * 10_000) / denom;
+        claimDragBps = (lifetimeClaims * SECONDS_PER_YEAR * 10_000) / denom;
+
+        netAPY = int256(premiumAPY) + int256(vaultAPY) - int256(claimDragBps);
+    }
+
+    function _vaultYieldUSDC() internal view returns (uint256) {
+        uint256 grossOut = _vaultAssetsHeldBy(usdcVault) + totalVaultUSDCWithdrawn;
+        return grossOut > totalVaultUSDCDeposited ? grossOut - totalVaultUSDCDeposited : 0;
+    }
+
+    function _vaultYieldWETH() internal view returns (uint256) {
+        uint256 grossOut = _vaultAssetsHeldBy(wethVault) + totalVaultWETHWithdrawn;
+        return grossOut > totalVaultWETHDeposited ? grossOut - totalVaultWETHDeposited : 0;
     }
 }
