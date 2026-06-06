@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "BackStop — IL insurance marketplace",
+  title: "BackStop",
   description: "Underwriter dashboard for the BackStop Uniswap v4 hook.",
 };
 
