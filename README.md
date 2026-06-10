@@ -4,7 +4,7 @@
 > Aave Umbrella, for impermanent loss.
 
 ![CI](https://github.com/youssef-jeddi/backstop/actions/workflows/test.yml/badge.svg) 
-[![codecov](https://codecov.io/gh/youssef-jeddi/backstop/branch/main/graph/badge.svg)](https://codecov.io/gh/youssef-jeddi/backstop)
+[![codecov](https://codecov.io/github/youssef-jeddi/backstop/graph/badge.svg?token=I4MSYJPY27)](https://codecov.io/github/youssef-jeddi/backstop)
 
 Built for the **UHI9 Hookathon**. **Cohort theme**: _Impermanent Loss & Yield Systems_. **No partner integrations**
 
