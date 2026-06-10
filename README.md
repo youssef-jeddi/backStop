@@ -1,11 +1,12 @@
-# BackStop
+# ☂️ BackStop
 
 > A two-sided impermanent loss insurance marketplace built as a Uniswap v4 hook.
 > Aave Umbrella, for impermanent loss.
 
-![CI](https://github.com/youssef-jeddi/backstop/actions/workflows/test.yml/badge.svg)
+![CI](https://github.com/youssef-jeddi/backstop/actions/workflows/test.yml/badge.svg) 
+[![codecov](https://codecov.io/gh/youssef-jeddi/backStop/branch/main/graph/badge.svg)](https://codecov.io/gh/youssef-jeddi/backStop)
 
-Built for the **UHI9 Hookathon**. Cohort theme: _Impermanent Loss & Yield Systems_.
+Built for the **UHI9 Hookathon**. **Cohort theme**: _Impermanent Loss & Yield Systems_. **No partner integrations**
 
 ---
 
@@ -21,7 +22,7 @@ No oracle, no admin, no governance. The pool's own swap activity sets its own in
 
 ---
 
-## Deployed (Sepolia)
+## 🚀 Live on Sepolia
 
 | Contract | Address |
 |---|---|
@@ -35,18 +36,18 @@ PoolManager is canonical Sepolia v4 (`0xE03A1074c86CFeDd5C142C4F04F1a1536e203543
 
 ---
 
-## Key mechanics
+## ✨ Key mechanics
 
 - **Convex premium curve** (`premium ∝ vol²`) on realized volatility from a 16-slot sqrt-price observation buffer. Floors at 5%, saturates at 30%. Matches the σ²-shape of expected IL under GBM.
 - **Dynamic LP fee + return-delta routing.** Per swap, `beforeSwap` overrides the LP fee to `TARGET × (1 − premiumRate)`; `afterSwap` claims the missing slice as a hookDelta on the unspecified currency and `take()`s it from the PoolManager. Trader's total fee stays constant at 0.30%.
 - **80/20 buffer/vault split.** Underwriter capital sits 20% liquid in the hook (instant claim payouts) and 80% in a yield vault. Enforced on every deposit (not just sweep) so principal earns vault yield from day 1.
-- **Closed-form IL.** Computed at `afterRemoveLiquidity` from the LP's entry vs current sqrt-price via `(a − b)² / (a² + b²)`. No oracle, no integration.
+- **Closed-form IL.** Computed at `afterRemoveLiquidity` from the LP's entry vs current sqrt-price using the [**FullMath**](https://github.com/Uniswap/v4-core/blob/main/src/libraries/FullMath.sol) uniswap library. No oracle, no integration.
 - **Share-based underwriter accounting** (ERC4626-style). Each side priced against per-side NAV (buffer + hook's claim on the vault). Auto-sweep on every deposit/withdraw keeps NAV current.
 - **5 hook permission flags.** `afterAdd`, `afterRemove`, `beforeSwap`, `afterSwap`, `afterSwapReturnDelta`.
 
 ---
 
-## Build & test
+## 🏗️ Build & test
 
 Foundry-based contracts in `contracts/`.
 
@@ -56,13 +57,15 @@ forge build
 forge test
 ```
 
-Full test suite: 89 unit tests + 1 end-to-end integration test (`BackstopDemo.t.sol`) covering deploy/permissions, volatility math, swap accrual, underwriter ops, entry tracking, IL math, IL payout, view surface, and a full lifecycle scenario.
+Full test suite: 78 unit tests + 1 end-to-end integration test (`BackstopDemo.t.sol`) covering deploy/permissions, volatility math, swap accrual, underwriter ops, entry tracking, IL math, IL payout, view surface, and a full lifecycle scenario.
 
 ```bash
 forge test --mc BackstopDemo -vvv   # narrative end-to-end demo
 ```
 
 ### Coverage (`forge coverage`)
+
+Run `forge coverage` locally to verify. Snapshot from latest build:
 
 | File | Lines | Statements | Branches | Funcs |
 |---|---:|---:|---:|---:|
@@ -73,7 +76,7 @@ forge test --mc BackstopDemo -vvv   # narrative end-to-end demo
 
 ---
 
-## Run the frontend
+## 💻 Run the frontend
 
 ```bash
 cd frontend
@@ -88,9 +91,5 @@ Open `http://localhost:3000`, connect a Sepolia wallet, deposit as an underwrite
 
 ---
 
-## Repo layout
-
-```
-contracts/    Foundry project — BackstopHook + mock vaults + tests + deploy scripts
-frontend/     Next.js dashboard + faucet
-```
+## 📜 License
+MIT
